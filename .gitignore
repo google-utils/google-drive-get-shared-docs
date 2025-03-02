@@ -1,0 +1,8 @@
+.venv/
+.idea/
+
+sa/*
+!sa/.gitkeep
+_delete_a_doc.py
+
+output.json
