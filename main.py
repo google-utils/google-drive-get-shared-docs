@@ -10,7 +10,7 @@ def get_all_users(workspace_data):
     Returns all users from workspace
     """
     all_users = []
-    admin_creds = get_admin_creds(f"./sa/{workspace_data['sa']}", workspace_data["admin"])
+    admin_creds = get_admin_creds(f"./sa/adminitrator.json", workspace_data["admin"])
     service = build('admin', 'directory_v1', credentials=admin_creds)
     request = service.users().list(domain=workspace_data["domain"], query='isSuspended=false', maxResults=500)
     while request is not None:
@@ -20,17 +20,21 @@ def get_all_users(workspace_data):
     return all_users
 
 
-def list_shared_documents(workspace_data, user_email):
+def list_shared_documents(user_email, limit=None, supports_all_drives=False):
     """
     Returns a list of docs shared with user but not owned by them
     """
-    user_creds = get_user_creds(f"./sa/{workspace_data['sa']}", user_email)
+    print(f"Getting docs for {user_email} with limit='{limit}' and supports_all_drives='{supports_all_drives}'")
+    user_creds = get_user_creds(f"./sa/adminitrator.json", user_email)
     service = build('drive', 'v3', credentials=user_creds)
+
+    found_docs = 0
+    page_num = 1
 
     # query = "'me' in readers and not 'me' in owners and trashed = false"
     # query = "'me' in writers and not 'me' in owners and trashed = false"
     query = "('me' in writers or 'me' in readers) and not 'me' in owners and trashed = false"
-    fields = "nextPageToken, files(id, name, mimeType, createdTime, modifiedTime, owners, permissions)"
+    fields = "nextPageToken, files(id, name, mimeType, createdTime, modifiedTime, owners, permissions, driveId)"
     documents = []
     page_token = None
 
@@ -51,44 +55,88 @@ def list_shared_documents(workspace_data, user_email):
     }
 
     while True:
-        results = service.files().list(q=query, fields=fields, pageToken=page_token).execute()
-        items = results.get('files', [])
-        for item in items:
-            mime_type = item.get('mimeType', 'N/A')
-            file_id = item.get('id', 'N/A')
-            document_link = mime_type_to_link.get(mime_type, "https://drive.google.com/file/d/") + file_id
-            perms = [perm['emailAddress'] for perm in item.get('permissions', []) if 'emailAddress' in perm]
-            if not perms:
-                continue
-            documents.append([
-                item.get('name', 'N/A'),
-                file_id,
-                document_link,
-                mime_type,
-                item.get('createdTime', 'N/A'),
-                item.get('modifiedTime', 'N/A'),
-                ', '.join([owner['emailAddress'] for owner in item.get('owners', [])]),
-                ', '.join([perm['emailAddress'] for perm in item.get('permissions', []) if 'emailAddress' in perm])
-            ])
-        page_token = results.get('nextPageToken')
-        if not page_token:
+        try:
+            if supports_all_drives:
+                results = service.files().list(
+                    q=query,
+                    fields=fields,
+                    pageToken=page_token,
+                    corpora='allDrives',
+                    includeItemsFromAllDrives=True,
+                    supportsAllDrives=True
+                ).execute()
+            else:
+                results = service.files().list(
+                    q=query,
+                    fields=fields,
+                    pageToken=page_token,
+                ).execute()
+
+            items = results.get('files', [])
+            found_docs = found_docs + len(items)
+            print(f" Page {page_num}: Found {len(items)} docs (Total: {found_docs})")
+
+            for item in items:
+                mime_type = item.get('mimeType', 'N/A')
+                if mime_type.startswith('application/vnd.google-apps.'):
+                    mime_type = mime_type.replace('application/vnd.google-apps.', '')
+                file_id = item.get('id', 'N/A')
+                document_link = mime_type_to_link.get(mime_type, "https://drive.google.com/file/d/") + file_id
+                perms = [perm['emailAddress'] for perm in item.get('permissions', []) if 'emailAddress' in perm]
+                # if not perms:
+                #     continue
+                documents.append([
+                    item.get('name', 'N/A'),
+                    file_id,
+                    document_link,
+                    mime_type,
+                    item.get('createdTime', 'N/A'),
+                    item.get('modifiedTime', 'N/A'),
+                    ', '.join([owner['emailAddress'] for owner in item.get('owners', [])]),
+                    'N/A',  # Placeholder for Drive Name
+                    ', '.join([perm['emailAddress'] for perm in item.get('permissions', []) if 'emailAddress' in perm]),
+                    item.get('driveId', 'N/A')
+                ])
+            
+            if limit and found_docs >= limit:
+                break
+            page_token = results.get('nextPageToken')
+            if not page_token:
+                break
+            page_num += 1
+        except Exception as e:
+            print(f"Error searching files: {str(e)}")
             break
+
     return documents
 
 
-def create_google_sheet(workspace_data, sheet_name):
+def create_google_sheet(sheet_name):
     """
-    Creates a new Google Sheet and returns its ID
+    Creates a new Google Sheet in the specified shared drive and returns its ID
     """
-    sa_creds = get_sa_creds(f"./sa/{workspace_data['sa']}")
-    service = build('sheets', 'v4', credentials=sa_creds)
+    sa_creds = get_sa_creds(f"./sa/adminitrator.json")
+    service = build('drive', 'v3', credentials=sa_creds)
+    sheets_service = build('sheets', 'v4', credentials=sa_creds)
+    
+    # Create the spreadsheet
     spreadsheet = {
         'properties': {
             'title': sheet_name
         }
     }
-    spreadsheet = service.spreadsheets().create(body=spreadsheet, fields='spreadsheetId').execute()
-    return spreadsheet.get('spreadsheetId')
+    spreadsheet = sheets_service.spreadsheets().create(body=spreadsheet, fields='spreadsheetId').execute()
+    spreadsheet_id = spreadsheet.get('spreadsheetId')
+    
+    # Move the file to the shared drive
+    file = service.files().update(
+        fileId=spreadsheet_id,
+        addParents='YOUR_SHARED_DRIVE_ID',
+        supportsAllDrives=True,
+        fields='id, parents'
+    ).execute()
+    
+    return spreadsheet_id
 
 
 def delete_sheet(service, sh_id, sheet_id):
@@ -107,31 +155,32 @@ def delete_sheet(service, sh_id, sheet_id):
     service.spreadsheets().batchUpdate(spreadsheetId=sh_id, body=body).execute()
 
 
-def share_google_sheet(workspace_data, sh_id, user_email):
+def share_google_sheet(sh_id, user_email):
     """
     Shares the Google Sheet with the specified user
     """
-    sa_creds = get_sa_creds(f"./sa/{workspace_data['sa']}")
+    sa_creds = get_sa_creds(f"./sa/adminitrator.json")
     service = build('drive', 'v3', credentials=sa_creds)
     user_permission = {
         'type': 'user',
-        'role': 'reader',
+        'role': 'writer',
         'emailAddress': user_email
     }
     r = service.permissions().create(
         fileId=sh_id,
         body=user_permission,
-        fields='id'
+        fields='id',
+        supportsAllDrives=True
     ).execute()
     return r
 
 
-def write_to_google_sheet(workspace_data, sh_id, email, data):
+def write_to_google_sheet(sh_id, email, data, shared_drives):
     """
     Write all the docs shared with the user to the spreadsheet_id in chunks of 1000 rows.
     """
     try:
-        sa_creds = get_sa_creds(f"./sa/{workspace_data['sa']}")
+        sa_creds = get_sa_creds(f"./sa/adminitrator.json")
         service = build('sheets', 'v4', credentials=sa_creds)
         sheet_service = service.spreadsheets()
 
@@ -146,13 +195,23 @@ def write_to_google_sheet(workspace_data, sh_id, email, data):
         body = {'requests': requests}
         sheet_service.batchUpdate(spreadsheetId=sh_id, body=body).execute()
 
-        # Add headers to the data
-        headers = ["Name", "ID", "Link", "Mime Type", "Created Time", "Modified Time", "Owners", "Permissions"]
-        data.insert(0, headers)
+        # Match all drive names
+        for doc in data:
+            drive_id = doc[9]  # Get drive ID from the last column
+            drive_name = get_drive_name(drive_id, shared_drives)
+            doc[7] = drive_name  # Update the Drive Name column
+
+        # Prepare headers and data
+        headers = ["Name", "ID", "Link", "Mime Type", "Created Time", "Modified Time", "Owners", "Drive Name", "Permissions"]
+        # Remove driveId from each row
+        data = [row[:-1] for row in data]
+        
+        # Combine headers and data
+        all_data = [headers] + data
 
         # Write data in chunks of 1000 rows
-        for i in range(0, len(data), 1000):
-            chunk = data[i:i + 1000]
+        for i in range(0, len(all_data), 1000):
+            chunk = all_data[i:i + 1000]
             request = sheet_service.values().append(
                 spreadsheetId=sh_id,
                 range=f"{email}!A1",
@@ -201,22 +260,133 @@ def save_result_to_file(user_email, sh_id):
         json.dump(data, file, indent=4, ensure_ascii=False)
 
 
+def move_sa_files_to_shared_drive():
+    """
+    One-time operation to move all files owned by service account to shared drive
+    """
+    sa_creds = get_sa_creds(f"./sa/adminitrator.json")
+    service = build('drive', 'v3', credentials=sa_creds)
+    
+    # Get service account email
+    sa_info = service.about().get(fields='user').execute()
+    sa_email = sa_info['user']['emailAddress']
+    
+    # Query for files owned by service account
+    query = f"'{sa_email}' in owners"
+    fields = "nextPageToken, files(id, name)"
+    page_token = None
+    moved_count = 0
+    page_num = 1
+    
+    while True:
+        try:
+            results = service.files().list(
+                q=query,
+                fields=fields,
+                pageToken=page_token,
+                pageSize=1000,  # Increased page size
+                corpora='allDrives',
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True
+            ).execute()
+            
+            items = results.get('files', [])
+            print(f"Page {page_num}: Found {len(items)} files")
+            
+            for item in items:
+                try:
+                    # Move file to shared drive
+                    service.files().update(
+                        fileId=item['id'],
+                        addParents='YOUR_SHARED_DRIVE_ID',
+                        supportsAllDrives=True,
+                        fields='id, parents'
+                    ).execute()
+                    moved_count += 1
+                    print(f"Moved: {item['name']}")
+                except Exception as e:
+                    print(f"Failed to move {item['name']}: {str(e)}")
+            
+            page_token = results.get('nextPageToken')
+            if not page_token:
+                break
+            page_num += 1
+                
+        except Exception as e:
+            print(f"Error listing files: {str(e)}")
+            break
+    
+    print(f"\nTotal files moved: {moved_count}")
+    print(f"Total pages processed: {page_num}")
+
+
+def list_shared_drives(admin_email):
+    """
+    Lists all shared drives accessible to the admin account
+    """
+    admin_creds = get_admin_creds(f"./sa/adminitrator.json", admin_email)
+    service = build('drive', 'v3', credentials=admin_creds)
+    
+    drives = []
+    page_token = None
+    
+    while True:
+        try:
+            response = service.drives().list(
+                pageSize=100,
+                pageToken=page_token,
+                fields="nextPageToken, drives(id, name, createdTime)"
+            ).execute()
+            
+            for drive in response.get('drives', []):
+                drives.append({
+                    'id': drive.get('id'),
+                    'name': drive.get('name'),
+                    'created': drive.get('createdTime')
+                })
+            
+            page_token = response.get('nextPageToken')
+            if not page_token:
+                break
+                
+        except Exception as e:
+            print(f"Error listing shared drives: {str(e)}")
+            break
+    
+    return drives
+
+
+def get_drive_name(drive_id, shared_drives):
+    """
+    Get drive name from drive ID using shared drives list
+    """
+    for drive in shared_drives:
+        if drive['id'] == drive_id:
+            return drive['name']
+    return 'N/A'
+
+
 if __name__ == '__main__':
-    # users = get_all_users(ws_data["your_domain"])
-    # emails = [user['primaryEmail'] for user in users if 'old' not in user['primaryEmail']]
+    # List all accessible shared drives
+    print("\nListing all accessible shared drives:")
+    shared_drives = list_shared_drives("your_admin_email@your_domain.com")
+    print(len(shared_drives))
+    
+    # Uncomment to run the one-time operation
+    # move_sa_files_to_shared_drive()
+    # sleep(10)
 
     for account in desired_accounts:
         print(f'Processing user: {account["old"]}')
-        user_docs = list_shared_documents(ws_data[main_domain], account["old"])
+        user_docs = list_shared_documents(account["old"], limit=None, supports_all_drives=False)
         print(f"Found {len(user_docs)} docs")
         
         if user_docs:
-            spreadsheet_id = create_google_sheet(ws_data[main_domain], f"Files shared with {account['old']}")
-            insert_data = write_to_google_sheet(ws_data[main_domain], spreadsheet_id, account["old"], user_docs)
+            spreadsheet_id = create_google_sheet(f"Files shared with {account['old']}")
+            insert_data = write_to_google_sheet(spreadsheet_id, account["old"], user_docs, shared_drives)
             if insert_data:
-                shared = share_google_sheet(ws_data[main_domain], spreadsheet_id, account["new"])
+                shared = share_google_sheet(spreadsheet_id, account["new"])
                 if shared:
                     save_result_to_file(account["new"], spreadsheet_id)
-
                 print(f" + Google Sheet was shared with: {account['new']}")
         sleep(200)

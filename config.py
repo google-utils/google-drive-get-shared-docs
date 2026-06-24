@@ -1,33 +1,36 @@
 from google.oauth2 import service_account
-main_domain = "your_domain"
 
-# Configure for your domain
+
+# Workspaces to process: domain -> admin to impersonate (domain-wide delegation).
 ws_data = {
-    f"{main_domain}": {
-        "domain": main_domain,
-        "sa": "adminitrator.json",
-        "admin": f"your_admin_email@{main_domain}",
-    }
+    "your_domain.com": {
+        "domain": "your_domain.com",
+        "admin": "your_admin_email@your_domain.com",
+    },
+    # "second_domain.com": {
+    #     "domain": "second_domain.com",
+    #     "admin": "your_admin_email@second_domain.com",
+    # }
 }
 
+# Accounts to process: list the docs shared with "old", share the resulting
+# sheet with "new".
 desired_accounts = [
     {
-        "old": "u.name@your_domain.com", # user to investigate
-        "new": "u.name@another_domain.com" # user to share a sheet with
+        "old": "u.name@your_domain.com",
+        "new": "u.name@another_domain.com"
     },
-    {
-        "old": "u.name_2@your_domain.com", # user to investigate
-        "new": "u.name_2@another_domain.com" # user to share a sheet with
-    }
 ]
 
 def get_admin_creds(sa_path, admin_email):
     credentials = service_account.Credentials.from_service_account_file(
         sa_path,
         scopes=[
+            # 'https://www.googleapis.com/auth/admin.directory.user',
             'https://www.googleapis.com/auth/admin.directory.user.readonly',
+            # 'https://www.googleapis.com/auth/drive',
             'https://www.googleapis.com/auth/drive.readonly',
-            'https://www.googleapis.com/auth/spreadsheets'
+            'https://www.googleapis.com/auth/spreadsheets',
         ],
         subject=admin_email
     )
@@ -40,7 +43,7 @@ def get_sa_creds(service_account_file):
     """
     scopes = [
         'https://www.googleapis.com/auth/spreadsheets',
-        'https://www.googleapis.com/auth/drive.file'
+        'https://www.googleapis.com/auth/drive.file',
     ]
     creds = service_account.Credentials.from_service_account_file(service_account_file, scopes=scopes)
     return creds
